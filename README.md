@@ -1,8 +1,8 @@
 # lighter-mm-dryrun-grid
 
-⚡ Support this project — Trade on Lighter – Spot & Perpetuals, 100% decentralized, no KYC, and ZERO fees – https://app.lighter.xyz/?referral=FREQTRADE (100% kickback with this link)
-
 A Rust market-making dry-run engine that runs hundreds of parameter combinations simultaneously against live Lighter DEX and Binance order book feeds, simulating fills in real time without placing real orders — to find optimal spread, skew, and inventory decay settings under actual market conditions.
+
+⚡ Support this project — Trade on Lighter – Spot & Perpetuals, 100% decentralized, no KYC, and ZERO fees – https://app.lighter.xyz/?referral=FREQTRADE (100% kickback with this link)
 
 ## Quick Start
 
