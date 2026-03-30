@@ -481,10 +481,11 @@ impl GridRunner {
             if total > best_pnl {
                 best_pnl = total;
                 best_label = format!(
-                    "{} (v2hs={}, skew={})",
+                    "{} (v2hs={}, skew={}, c1={})",
                     slot.params.label,
                     slot.params.vol_to_half_spread,
                     slot.params.skew,
+                    slot.params.c1_ticks,
                 );
             }
         }
@@ -502,15 +503,16 @@ impl GridRunner {
             self.slots.len(), elapsed_str, mid, total_fills, slots_with_fills, total_volume,
         ));
         lines.push(format!(
-            "{:<5} | {:>5} | {:>5} | {:>5} | {:>9} | {:>9}",
-            "Slot", "v2hs", "skew", "Fills", "Total", "Volume"
+            "{:<5} | {:>5} | {:>5} | {:>5} | {:>5} | {:>9} | {:>9}",
+            "Slot", "v2hs", "skew", "c1", "Fills", "Total", "Volume"
         ));
         // Show top 10 only
         for &(i, pnl) in sorted.iter().take(10) {
             let s = &self.slots[i];
             lines.push(format!(
-                "{:<5} | {:>5.1} | {:>5.1} | {:>5} | ${:>8.4} | ${:>8.2}",
+                "{:<5} | {:>5.1} | {:>5.1} | {:>5.0} | {:>5} | ${:>8.4} | ${:>8.2}",
                 s.params.label, s.params.vol_to_half_spread, s.params.skew,
+                s.params.c1_ticks,
                 s.dry_engine.fill_count, pnl, s.dry_engine.total_volume,
             ));
         }

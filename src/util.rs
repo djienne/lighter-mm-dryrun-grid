@@ -20,7 +20,7 @@ pub fn param_key(
     c1_ticks: f64,
 ) -> String {
     format!(
-        "v{}_m{}_s{}_f{}_c{}_l{}_c1{}",
+        "v{}_m{}_s{}_f{}_c{}_l{}_t{}",
         vol_to_half_spread, min_half_spread_bps, skew,
         spread_factor_level1, capital_usage_percent, num_levels, c1_ticks,
     )
@@ -40,6 +40,6 @@ mod tests {
     #[test]
     fn test_param_key() {
         let key = param_key(48.0, 8.0, 3.0, 2.0, 0.12, 2, 20.0);
-        assert_eq!(key, "v48_m8_s3_f2_c0.12_l2_c120");
+        assert_eq!(key, "v48_m8_s3_f2_c0.12_l2_t20");
     }
 }

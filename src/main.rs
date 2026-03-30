@@ -222,7 +222,7 @@ async fn run_with_grid(
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("failed to register SIGTERM handler");
 
-    tracing::info!("Entering main loop ({} slots, warmup={}s)...", runner.slot_count(), warmup_seconds);
+    tracing::info!("Entering main loop ({} slots), warmup period started ({}s)...", runner.slot_count(), warmup_seconds);
 
     loop {
         if let Some(dur) = test_duration {
