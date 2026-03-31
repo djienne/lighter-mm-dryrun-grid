@@ -171,9 +171,9 @@ impl GridRunner {
             }
         }
 
-        if param_combos.len() > 500 {
+        if param_combos.len() > 2000 {
             anyhow::bail!(
-                "Grid too large: {} combos (max 500)",
+                "Grid too large: {} combos (max 2000)",
                 param_combos.len()
             );
         }

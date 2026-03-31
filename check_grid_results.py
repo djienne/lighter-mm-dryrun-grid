@@ -154,7 +154,7 @@ def print_summary(slots: list[dict], trade_counts: dict, top_n: int, sort_key: s
     latest = max(timestamps) if timestamps else None
 
     print("=" * 90)
-    print("GRID DRY-RUN RESULTS SUMMARY")
+    print("LIGHTER — GRID DRY-RUN RESULTS SUMMARY")
     print("=" * 90)
     print(f"  Slots: {total_slots} total, {active_slots} with fills, {total_slots - active_slots} idle")
     print(f"  Fills: {total_fills:,}")
