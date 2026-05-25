@@ -2,10 +2,10 @@
 """Scan grid dry-run results and print summary statistics.
 
 Usage:
-    python check_grid_results.py              # scan logs/grid/
-    python check_grid_results.py /path/to/grid/  # custom directory
-    python check_grid_results.py --top 20     # show top 20 (default 10)
-    python check_grid_results.py --sort fills # sort by fills instead of total_pnl
+    python3 check_grid_results.py              # scan logs/grid/
+    python3 check_grid_results.py /path/to/grid/  # custom directory
+    python3 check_grid_results.py --top 20     # show top 20 (default 10)
+    python3 check_grid_results.py --sort fills # sort by fills instead of total_pnl
 """
 
 import argparse
