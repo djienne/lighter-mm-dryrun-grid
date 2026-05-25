@@ -10,6 +10,7 @@ Usage:
 
 import argparse
 import csv
+import gzip
 import json
 import os
 import sys
@@ -78,32 +79,65 @@ def load_state_files(grid_dir: str) -> list[dict]:
     return slots
 
 
-def load_trade_counts(grid_dir: str) -> dict[str, int]:
-    """Count trade rows per param_key from CSV files."""
+def load_trade_counts(grid_dir: str) -> tuple[dict[str, int], datetime | None, datetime | None]:
+    """Count trade rows per param_key from active CSV and rotated CSV.GZ files."""
     counts = {}
+    earliest = None
+    latest = None
     for fname in os.listdir(grid_dir):
-        if not fname.startswith("trades_") or not fname.endswith(".csv"):
+        if not is_trade_log_file(fname):
             continue
         path = os.path.join(grid_dir, fname)
         try:
-            with open(path) as f:
+            with open_trade_log(path) as f:
                 reader = csv.reader(f)
-                n = sum(1 for _ in reader)
-            # Extract param_key
-            parts = fname[len("trades_"):-len(".csv")]
-            idx = parts.find("_v")
-            pk = parts[idx + 1:] if idx >= 0 else parts
-            counts[pk] = n
-        except OSError:
+                n = 0
+                for row in reader:
+                    if not row or row[0] == "timestamp":
+                        continue
+                    n += 1
+                    ts_str = row[0]
+                    try:
+                        ts = datetime.fromisoformat(ts_str.replace("Z", "+00:00"))
+                        if earliest is None or ts < earliest:
+                            earliest = ts
+                        if latest is None or ts > latest:
+                            latest = ts
+                    except ValueError:
+                        pass
+            pk = trade_log_param_key(fname)
+            counts[pk] = counts.get(pk, 0) + n
+        except (OSError, gzip.BadGzipFile, EOFError):
             continue
-    return counts
+    return counts, earliest, latest
+
+
+def is_trade_log_file(fname: str) -> bool:
+    return fname.startswith("trades_") and (fname.endswith(".csv") or fname.endswith(".csv.gz"))
+
+
+def open_trade_log(path: str):
+    if path.endswith(".gz"):
+        return gzip.open(path, "rt", newline="")
+    return open(path, newline="")
+
+
+def trade_log_param_key(fname: str) -> str:
+    if fname.endswith(".csv.gz"):
+        parts = fname[len("trades_"):-len(".csv.gz")]
+    else:
+        parts = fname[len("trades_"):-len(".csv")]
+    parts = parts.split("__rotated_", 1)[0]
+    idx = parts.find("_v")
+    return parts[idx + 1:] if idx >= 0 else parts
 
 
 def format_usd(val: float) -> str:
     return f"${val:>+9.4f}"
 
 
-def print_summary(slots: list[dict], trade_counts: dict, top_n: int, sort_key: str, maker_fee_rate: float):
+def print_summary(slots: list[dict], trade_counts: dict, top_n: int, sort_key: str, maker_fee_rate: float,
+                   data_start: datetime | None = None, data_end: datetime | None = None):
     if not slots:
         print("No grid state files found.")
         return
@@ -156,6 +190,10 @@ def print_summary(slots: list[dict], trade_counts: dict, top_n: int, sort_key: s
     print("=" * 90)
     print("LIGHTER — GRID DRY-RUN RESULTS SUMMARY")
     print("=" * 90)
+    if data_start and data_end:
+        duration = data_end - data_start
+        days = duration.total_seconds() / 86400
+        print(f"  Data range: {data_start.strftime('%Y-%m-%d %H:%M UTC')} → {data_end.strftime('%Y-%m-%d %H:%M UTC')}  ({days:.2f} days)")
     print(f"  Slots: {total_slots} total, {active_slots} with fills, {total_slots - active_slots} idle")
     print(f"  Fills: {total_fills:,}")
     print(f"  Volume: ${total_volume:,.2f}")
@@ -305,8 +343,8 @@ def main():
         sys.exit(1)
 
     slots = load_state_files(args.grid_dir)
-    trade_counts = load_trade_counts(args.grid_dir)
-    print_summary(slots, trade_counts, args.top, args.sort, args.fee)
+    trade_counts, data_start, data_end = load_trade_counts(args.grid_dir)
+    print_summary(slots, trade_counts, args.top, args.sort, args.fee, data_start, data_end)
 
 
 if __name__ == "__main__":

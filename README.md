@@ -16,6 +16,31 @@ cargo build --release
 ./target/release/lighter-mm-dryrun --symbol BTC --dry-run --capital 1000
 ```
 
+## Docker
+
+Run the default BTC grid in the background:
+
+```bash
+docker compose build
+docker compose up -d
+docker compose ps
+docker compose logs -f --tail=100
+```
+
+Stop gracefully:
+
+```bash
+docker compose stop
+```
+
+The Compose service uses `restart: unless-stopped`, handles Docker `SIGTERM` shutdown, persists generated files in `./logs`, and caps Docker stdout logs at `10m x 5`. Docker and native runs use the same host `./logs/grid/` output directory, so existing state and trade history are restored and appended to.
+
+The runtime image is small, but Docker build cache can grow after rebuilds. To reclaim build cache without deleting the built image:
+
+```bash
+docker builder prune -f
+```
+
 ## CLI Flags
 
 | Flag | Default | Description |
@@ -58,12 +83,14 @@ Defines the parameter sweep. All combinations in `parameters` are crossed (carte
 ```json
 {
   "capital": 1000,
+  "leverage": 1,
   "warmup_seconds": 600,
+  "summary_interval_seconds": 60,
   "sim_latency_s": 0.050,
   "parameters": {
     "vol_to_half_spread": [6, 10, 15, 21, 30, 42, 60, 80],
     "skew": [0.1, 0.5, 1.5, 3.0, 5.0],
-    "c1_ticks": [5, 10, 20, 40, 80, 120, 160, 250, 350, 500]
+    "c1_ticks": [5, 10, 20, 40, 80, 120, 160, 250, 350, 500, 600, 800, 1000]
   },
   "fixed": {
     "min_half_spread_bps": 4,
@@ -76,7 +103,7 @@ Defines the parameter sweep. All combinations in `parameters` are crossed (carte
 
 ### `config.json` (single dry-run mode)
 
-Controls trading strategy, alpha source, WebSocket settings, and performance tuning. See `src/config.rs` for all fields and defaults.
+Controls trading strategy, alpha source, WebSocket settings, performance tuning, and output retention. See `src/config.rs` for all fields and defaults.
 
 ## Environment Variables
 
@@ -89,17 +116,22 @@ Controls trading strategy, alpha source, WebSocket settings, and performance tun
 
 Grid results are written to `$LOG_DIR/grid/`:
 
-- `state_<SYMBOL>_<param_key>.json` — final state per slot (PnL, fill count, volume)
-- `trades_<SYMBOL>_<param_key>.csv` — trade log per slot
+- `state_<SYMBOL>_<param_key>.json` — checkpoint state per slot for restart continuity
+- `trades_<SYMBOL>_<param_key>.csv` — active trade log per slot
+- `trades_<SYMBOL>_<param_key>__rotated_<UTC>.csv.gz` — compressed rotated trade history
+- `summary.log` — compact run summary
+- `results_<SYMBOL>_<UTC>.csv` — final run snapshot
+
+Output retention is configured in `config.json` under `output`. By default per-fill trade logs stay enabled, active CSV files rotate at 128 KiB, rotated chunks are gzip-compressed with maximum compression, and generated output is capped at 500 MiB. When the cap is reached, result files and summaries are pruned before compressed trade chunks so fill history lasts as long as possible. `state_*.json` files are not deleted by retention because they are required for restart continuity.
 
 ## Analysis
 
 ```bash
-python check_grid_results.py                    # scan logs/grid/
-python check_grid_results.py /path/to/grid/     # custom directory
-python check_grid_results.py --top 20           # show top 20 slots
-python check_grid_results.py --sort fills       # sort by fill count
-python check_grid_results.py --fee 0.00005      # custom maker fee rate
+python3 check_grid_results.py                    # scan logs/grid/
+python3 check_grid_results.py /path/to/grid/     # custom directory
+python3 check_grid_results.py --top 20           # show top 20 slots
+python3 check_grid_results.py --sort fills       # sort by fill count
+python3 check_grid_results.py --fee 0.00005      # custom maker fee rate
 ```
 
-Outputs: overall summary, top/bottom performers, per-parameter average PnL, and v2hs x skew heatmaps.
+The analyzer reads active `.csv` trade logs and rotated `.csv.gz` trade history. Outputs: overall summary, top/bottom performers, per-parameter average PnL, and v2hs x skew heatmaps.

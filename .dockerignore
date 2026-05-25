@@ -1,0 +1,10 @@
+target/
+logs/
+.git/
+.gitignore
+__pycache__/
+*.pyc
+.pytest_cache/
+.DS_Store
+*.swp
+*.swo

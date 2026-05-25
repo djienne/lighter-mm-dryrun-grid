@@ -60,5 +60,15 @@
         "circuit_breaker_cooldown_sec": 60.0,
         "order_reconcile_timeout_sec": 2.0,
         "max_live_orders_per_market": 4
+    },
+    "output": {
+        "trade_log_enabled": true,
+        "trade_log_rotate_bytes": 131072,
+        "trade_log_compress_rotated": true,
+        "generated_output_max_bytes": 524288000,
+        "summary_log_rotate_bytes": 10485760,
+        "summary_log_max_files": 3,
+        "results_max_files": 50,
+        "flush_interval_seconds": 60.0
     }
 }

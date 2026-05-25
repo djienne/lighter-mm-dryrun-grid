@@ -17,6 +17,7 @@ csv = "1"
 futures-util = "0.3"
 ordered-float = { version = "5", features = ["serde"] }
 anyhow = "1"
+flate2 = "1"
 
 [profile.release]
 opt-level = 3

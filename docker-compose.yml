@@ -1,0 +1,27 @@
+services:
+  lighter-mm-dryrun:
+    build: .
+    image: lighter-mm-dryrun:local
+    container_name: lighter-mm-dryrun
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 120s
+    environment:
+      LOG_DIR: /app/logs
+      RUST_LOG: info
+    command:
+      - --symbol
+      - BTC
+      - --config
+      - /app/config/config.json
+      - --grid
+      - /app/config/grid_config.json
+    volumes:
+      - ./logs:/app/logs
+      - ./config.json:/app/config/config.json:ro
+      - ./grid_config.json:/app/config/grid_config.json:ro
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"

@@ -1,11 +1,12 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
-use std::time::Instant;
+use std::fs;
+use std::path::{Path, PathBuf};
+use std::time::{Instant, SystemTime};
 
-use crate::config::{Config, GridConfig};
+use crate::config::{Config, GridConfig, OutputConfig};
 use crate::dry_run::DryRunEngine;
 use crate::order_manager::{Action, BatchOp, OrderManager, OrderState, Side};
-use crate::trade_log::TradeLogger;
+use crate::trade_log::{TradeLogOptions, TradeLogger};
 use crate::types::{AccountState, MarketConfig};
 use crate::util;
 use crate::vol_obi::VolObiCalculator;
@@ -101,6 +102,7 @@ pub struct GridRunner {
     // Runtime
     pub slots: Vec<GridSlot>,
     grid_dir: PathBuf,
+    output: OutputConfig,
     start_time: Instant,
     last_summary: Instant,
 }
@@ -116,8 +118,10 @@ impl GridRunner {
         // Build Cartesian product
         let mut axis_names: Vec<String> = grid_config.parameters.keys().cloned().collect();
         axis_names.sort();
-        let axis_values: Vec<&Vec<f64>> =
-            axis_names.iter().map(|k| &grid_config.parameters[k]).collect();
+        let axis_values: Vec<&Vec<f64>> = axis_names
+            .iter()
+            .map(|k| &grid_config.parameters[k])
+            .collect();
 
         if axis_values.is_empty() {
             anyhow::bail!("Grid config 'parameters' must contain at least one axis");
@@ -172,10 +176,7 @@ impl GridRunner {
         }
 
         if param_combos.len() > 2000 {
-            anyhow::bail!(
-                "Grid too large: {} combos (max 2000)",
-                param_combos.len()
-            );
+            anyhow::bail!("Grid too large: {} combos (max 2000)", param_combos.len());
         }
 
         tracing::info!(
@@ -205,6 +206,7 @@ impl GridRunner {
             param_combos,
             slots: Vec::new(),
             grid_dir,
+            output: app_config.output.clone(),
             start_time: now,
             last_summary: now,
         })
@@ -236,7 +238,9 @@ impl GridRunner {
                 500.0,
             );
 
-            let state_path = self.grid_dir.join(format!("state_{}_{}.json", self.symbol, pk));
+            let state_path = self
+                .grid_dir
+                .join(format!("state_{}_{}.json", self.symbol, pk));
 
             let mut engine = DryRunEngine::new(
                 self.leverage,
@@ -253,16 +257,28 @@ impl GridRunner {
                 engine.restore_from(&saved);
                 tracing::info!(
                     "Grid slot {} ({}): restored | capital=${:.2} pos={:.6} pnl=${:.4} fills={}",
-                    params.label, pk, saved.available_capital, saved.position,
-                    saved.realized_pnl, saved.fill_count,
+                    params.label,
+                    pk,
+                    saved.available_capital,
+                    saved.position,
+                    saved.realized_pnl,
+                    saved.fill_count,
                 );
             } else {
                 engine.capture_initial_state(self.capital, self.capital, 0.0, None);
-                tracing::info!("Grid slot {} ({}): fresh | capital=${:.0}", params.label, pk, self.capital);
+                tracing::info!(
+                    "Grid slot {} ({}): fresh | capital=${:.0}",
+                    params.label,
+                    pk,
+                    self.capital
+                );
             }
 
-            let trade_logger =
-                TradeLogger::new(&self.grid_dir, &format!("{}_{}", self.symbol, pk))?;
+            let trade_logger = TradeLogger::new(
+                &self.grid_dir,
+                &format!("{}_{}", self.symbol, pk),
+                self.trade_log_options(),
+            )?;
 
             let spread_factors: Vec<f64> = (0..n_levels)
                 .map(|lvl| params.spread_factor_level1.powi(lvl as i32))
@@ -286,6 +302,7 @@ impl GridRunner {
         }
 
         tracing::info!("Created {} grid slots", self.slots.len());
+        self.enforce_output_cap();
         Ok(())
     }
 
@@ -371,15 +388,25 @@ impl GridRunner {
         };
 
         let base_amount = compute_base_amount(
-            mid, capital, slot.params.capital_usage_percent,
-            self.leverage, market_config, self.min_order_value_usd,
+            mid,
+            capital,
+            slot.params.capital_usage_percent,
+            self.leverage,
+            market_config,
+            self.min_order_value_usd,
         );
         let base_amount = match base_amount {
             Some(a) if a > 0.0 => a,
             _ => return,
         };
 
-        let max_pos = compute_max_pos(mid, capital, base_amount, slot.params.num_levels, self.leverage);
+        let max_pos = compute_max_pos(
+            mid,
+            capital,
+            base_amount,
+            slot.params.num_levels,
+            self.leverage,
+        );
 
         if !slot.calculator.warmed_up() {
             return;
@@ -422,11 +449,19 @@ impl GridRunner {
             let factor = slot.spread_factors[lvl];
             let raw_bid = bid_depth.map(|d| {
                 let raw = mid - d * factor;
-                if tick > 0.0 { (raw / tick).floor() * tick } else { raw }
+                if tick > 0.0 {
+                    (raw / tick).floor() * tick
+                } else {
+                    raw
+                }
             });
             let raw_ask = ask_depth.map(|d| {
                 let raw = mid + d * factor;
-                if tick > 0.0 { (raw / tick).ceil() * tick } else { raw }
+                if tick > 0.0 {
+                    (raw / tick).ceil() * tick
+                } else {
+                    raw
+                }
             });
             levels.push((raw_bid, raw_ask));
         }
@@ -471,8 +506,9 @@ impl GridRunner {
         for slot in &mut self.slots {
             let unrealized = slot.dry_engine.compute_unrealized_pnl(Some(mid));
             let total = slot.dry_engine.realized_pnl + unrealized;
-            slot.account.portfolio_value =
-                Some(slot.dry_engine.initial_portfolio_value + slot.dry_engine.realized_pnl + unrealized);
+            slot.account.portfolio_value = Some(
+                slot.dry_engine.initial_portfolio_value + slot.dry_engine.realized_pnl + unrealized,
+            );
             total_fills += slot.dry_engine.fill_count;
             total_volume += slot.dry_engine.total_volume;
             if slot.dry_engine.fill_count > 0 {
@@ -491,16 +527,26 @@ impl GridRunner {
         }
 
         // Compact console summary: just top 10 + stats
-        let mut sorted: Vec<(usize, f64)> = self.slots.iter().enumerate().map(|(i, s)| {
-            let u = s.dry_engine.compute_unrealized_pnl(Some(mid));
-            (i, s.dry_engine.realized_pnl + u)
-        }).collect();
+        let mut sorted: Vec<(usize, f64)> = self
+            .slots
+            .iter()
+            .enumerate()
+            .map(|(i, s)| {
+                let u = s.dry_engine.compute_unrealized_pnl(Some(mid));
+                (i, s.dry_engine.realized_pnl + u)
+            })
+            .collect();
         sorted.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
 
         let mut lines = Vec::new();
         lines.push(format!(
             "GRID ({} slots, {} elapsed, mid=${:.2}) fills={} active={} vol=${:.0}",
-            self.slots.len(), elapsed_str, mid, total_fills, slots_with_fills, total_volume,
+            self.slots.len(),
+            elapsed_str,
+            mid,
+            total_fills,
+            slots_with_fills,
+            total_volume,
         ));
         lines.push(format!(
             "{:<5} | {:>5} | {:>5} | {:>5} | {:>5} | {:>9} | {:>9}",
@@ -511,9 +557,13 @@ impl GridRunner {
             let s = &self.slots[i];
             lines.push(format!(
                 "{:<5} | {:>5.1} | {:>5.1} | {:>5.0} | {:>5} | ${:>8.4} | ${:>8.2}",
-                s.params.label, s.params.vol_to_half_spread, s.params.skew,
+                s.params.label,
+                s.params.vol_to_half_spread,
+                s.params.skew,
                 s.params.c1_ticks,
-                s.dry_engine.fill_count, pnl, s.dry_engine.total_volume,
+                s.dry_engine.fill_count,
+                pnl,
+                s.dry_engine.total_volume,
             ));
         }
         if !best_label.is_empty() {
@@ -525,13 +575,7 @@ impl GridRunner {
         let summary_path = self.grid_dir.join("summary.log");
         let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ");
 
-        // Rotate if > 10MB
-        if let Ok(meta) = std::fs::metadata(&summary_path) {
-            if meta.len() > 10 * 1024 * 1024 {
-                let rotated = self.grid_dir.join("summary.log.1");
-                let _ = std::fs::rename(&summary_path, &rotated);
-            }
-        }
+        self.rotate_summary_if_needed(&summary_path);
 
         let _ = std::fs::OpenOptions::new()
             .create(true)
@@ -540,10 +584,12 @@ impl GridRunner {
             .and_then(|mut f| {
                 use std::io::Write;
                 writeln!(
-                    f, "{} mid={:.2} fills={} active={} vol={:.0} best={} ${:.4}",
+                    f,
+                    "{} mid={:.2} fills={} active={} vol={:.0} best={} ${:.4}",
                     ts, mid, total_fills, slots_with_fills, total_volume, best_label, best_pnl,
                 )
             });
+        self.enforce_output_cap();
     }
 
     /// Flush all slot states and trade logs to disk.
@@ -552,14 +598,23 @@ impl GridRunner {
             let cap = slot.account.available_capital.unwrap_or(0.0);
             let pv = slot.account.portfolio_value.unwrap_or(0.0);
             slot.dry_engine.save_state(cap, pv);
-            let _ = slot.trade_logger.flush();
+            if let Err(e) = slot.trade_logger.flush() {
+                tracing::warn!(
+                    "Failed to flush trade log for {}: {}",
+                    slot.trade_logger.path().display(),
+                    e,
+                );
+            }
         }
+        self.enforce_output_cap();
     }
 
     /// Write final CSV results.
     pub fn write_final_results(&self) {
         let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
-        let csv_path = self.grid_dir.join(format!("results_{}_{}.csv", self.symbol, ts));
+        let csv_path = self
+            .grid_dir
+            .join(format!("results_{}_{}.csv", self.symbol, ts));
 
         let file = match std::fs::File::create(&csv_path) {
             Ok(f) => f,
@@ -571,11 +626,21 @@ impl GridRunner {
         let mut wtr = csv::Writer::from_writer(file);
 
         let _ = wtr.write_record([
-            "slot", "param_key",
-            "vol_to_half_spread", "min_half_spread_bps", "skew",
-            "spread_factor_level1", "capital_usage_percent", "num_levels", "c1_ticks",
-            "fills", "realized_pnl", "unrealized_pnl", "total_pnl",
-            "total_volume", "portfolio_value",
+            "slot",
+            "param_key",
+            "vol_to_half_spread",
+            "min_half_spread_bps",
+            "skew",
+            "spread_factor_level1",
+            "capital_usage_percent",
+            "num_levels",
+            "c1_ticks",
+            "fills",
+            "realized_pnl",
+            "unrealized_pnl",
+            "total_pnl",
+            "total_volume",
+            "portfolio_value",
         ]);
 
         for slot in &self.slots {
@@ -606,6 +671,8 @@ impl GridRunner {
 
         let _ = wtr.flush();
         tracing::info!("Final results written to {}", csv_path.display());
+        self.prune_result_files();
+        self.enforce_output_cap();
     }
 
     pub fn warmup_seconds(&self) -> f64 {
@@ -615,6 +682,243 @@ impl GridRunner {
     pub fn slot_count(&self) -> usize {
         self.slots.len()
     }
+
+    pub fn flush_interval(&self) -> std::time::Duration {
+        std::time::Duration::from_secs_f64(self.output.flush_interval_seconds.max(1.0))
+    }
+
+    fn trade_log_options(&self) -> TradeLogOptions {
+        TradeLogOptions {
+            enabled: self.output.trade_log_enabled,
+            rotate_bytes: self.output.trade_log_rotate_bytes,
+            compress_rotated: self.output.trade_log_compress_rotated,
+        }
+    }
+
+    fn rotate_summary_if_needed(&self, summary_path: &Path) {
+        if let Err(e) = rotate_numbered_file(
+            summary_path,
+            self.output.summary_log_rotate_bytes,
+            self.output.summary_log_max_files,
+        ) {
+            tracing::warn!("Failed to rotate summary log: {}", e);
+        }
+    }
+
+    fn prune_result_files(&self) {
+        let max_files = self.output.results_max_files;
+        let mut files = match list_matching_files(&self.grid_dir, |name| {
+            name.starts_with("results_") && name.ends_with(".csv")
+        }) {
+            Ok(files) => files,
+            Err(e) => {
+                tracing::warn!("Failed to list result files for pruning: {}", e);
+                return;
+            }
+        };
+
+        if files.len() <= max_files {
+            return;
+        }
+
+        files.sort_by_key(|f| (f.modified, f.path.clone()));
+        let delete_count = files.len() - max_files;
+        for file in files.into_iter().take(delete_count) {
+            if let Err(e) = fs::remove_file(&file.path) {
+                tracing::warn!(
+                    "Failed to remove old result file {}: {}",
+                    file.path.display(),
+                    e
+                );
+            }
+        }
+    }
+
+    fn enforce_output_cap(&self) {
+        let cap = self.output.generated_output_max_bytes;
+        if cap == 0 {
+            return;
+        }
+
+        let mut files = match generated_files(&self.grid_dir) {
+            Ok(files) => files,
+            Err(e) => {
+                tracing::warn!("Failed to scan generated output for retention: {}", e);
+                return;
+            }
+        };
+
+        let mut total: u64 = files.iter().map(|f| f.size).sum();
+        if total <= cap {
+            return;
+        }
+
+        files.sort_by_key(|f| (f.delete_priority, f.modified, f.path.clone()));
+        for file in files {
+            if total <= cap {
+                break;
+            }
+            if file.delete_priority == DeletePriority::Keep {
+                continue;
+            }
+            match fs::remove_file(&file.path) {
+                Ok(()) => {
+                    total = total.saturating_sub(file.size);
+                    tracing::info!(
+                        "Retention removed {} ({} bytes), generated output now {} / {} bytes",
+                        file.path.display(),
+                        file.size,
+                        total,
+                        cap,
+                    );
+                }
+                Err(e) => tracing::warn!(
+                    "Failed to remove {} during retention: {}",
+                    file.path.display(),
+                    e
+                ),
+            }
+        }
+
+        if total > cap {
+            tracing::warn!(
+                "Generated output is still above cap: {} / {} bytes. Active trade CSVs and state files were preserved.",
+                total,
+                cap,
+            );
+        }
+    }
+}
+
+#[derive(Clone, Copy, Eq, PartialEq, Ord, PartialOrd)]
+enum DeletePriority {
+    Result,
+    SummaryArchive,
+    SummaryActive,
+    TradeArchive,
+    Keep,
+}
+
+struct GeneratedFile {
+    path: PathBuf,
+    size: u64,
+    modified: SystemTime,
+    delete_priority: DeletePriority,
+}
+
+fn rotate_numbered_file(path: &Path, rotate_bytes: u64, max_files: usize) -> std::io::Result<()> {
+    if rotate_bytes == 0 || !path.exists() || fs::metadata(path)?.len() < rotate_bytes {
+        return Ok(());
+    }
+
+    if max_files == 0 {
+        fs::remove_file(path)?;
+        return Ok(());
+    }
+
+    for idx in (1..=max_files).rev() {
+        let src = numbered_path(path, idx);
+        if !src.exists() {
+            continue;
+        }
+        if idx == max_files {
+            fs::remove_file(src)?;
+        } else {
+            fs::rename(src, numbered_path(path, idx + 1))?;
+        }
+    }
+
+    fs::rename(path, numbered_path(path, 1))?;
+    Ok(())
+}
+
+fn numbered_path(path: &Path, idx: usize) -> PathBuf {
+    let file_name = path
+        .file_name()
+        .and_then(|s| s.to_str())
+        .unwrap_or("summary.log");
+    path.with_file_name(format!("{}.{}", file_name, idx))
+}
+
+fn list_matching_files<F>(dir: &Path, matches: F) -> std::io::Result<Vec<GeneratedFile>>
+where
+    F: Fn(&str) -> bool,
+{
+    let mut files = Vec::new();
+    if !dir.exists() {
+        return Ok(files);
+    }
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        if !matches(name) {
+            continue;
+        }
+        let meta = entry.metadata()?;
+        files.push(GeneratedFile {
+            path,
+            size: meta.len(),
+            modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            delete_priority: DeletePriority::Result,
+        });
+    }
+    Ok(files)
+}
+
+fn generated_files(dir: &Path) -> std::io::Result<Vec<GeneratedFile>> {
+    let mut files = Vec::new();
+    if !dir.exists() {
+        return Ok(files);
+    }
+    for entry in fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_file() {
+            continue;
+        }
+        let Some(name) = path.file_name().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let Some(priority) = classify_generated_file(name) else {
+            continue;
+        };
+        let meta = entry.metadata()?;
+        files.push(GeneratedFile {
+            path,
+            size: meta.len(),
+            modified: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            delete_priority: priority,
+        });
+    }
+    Ok(files)
+}
+
+fn classify_generated_file(name: &str) -> Option<DeletePriority> {
+    if name.starts_with("state_") {
+        return None;
+    }
+    if name.starts_with("trades_") && name.contains("__rotated_") {
+        return Some(DeletePriority::TradeArchive);
+    }
+    if name.starts_with("results_") && name.ends_with(".csv") {
+        return Some(DeletePriority::Result);
+    }
+    if name.starts_with("summary.log.") {
+        return Some(DeletePriority::SummaryArchive);
+    }
+    if name == "summary.log" {
+        return Some(DeletePriority::SummaryActive);
+    }
+    if name.starts_with("trades_") && name.ends_with(".csv") {
+        return Some(DeletePriority::Keep);
+    }
+    None
 }
 
 // ---------------------------------------------------------------------------
@@ -622,9 +926,7 @@ impl GridRunner {
 // ---------------------------------------------------------------------------
 
 fn get_f64(map: &HashMap<String, serde_json::Value>, key: &str, default: f64) -> f64 {
-    map.get(key)
-        .and_then(|v| v.as_f64())
-        .unwrap_or(default)
+    map.get(key).and_then(|v| v.as_f64()).unwrap_or(default)
 }
 
 fn compute_base_amount(
@@ -745,7 +1047,11 @@ fn collect_slot_ops(
                 };
                 let size_changed = match existing_size {
                     Some(es) => {
-                        let min_diff = if amount_tick > 0.0 { amount_tick } else { util::EPSILON };
+                        let min_diff = if amount_tick > 0.0 {
+                            amount_tick
+                        } else {
+                            util::EPSILON
+                        };
                         (es - base_amount).abs() >= min_diff.max(util::EPSILON)
                     }
                     None => true,

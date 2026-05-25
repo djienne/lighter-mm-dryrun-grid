@@ -13,6 +13,8 @@ pub struct Config {
     pub performance: PerformanceConfig,
     #[serde(default)]
     pub websocket: WebsocketConfig,
+    #[serde(default)]
+    pub output: OutputConfig,
 }
 
 #[derive(Deserialize, Clone)]
@@ -82,6 +84,41 @@ pub struct PerformanceConfig {
 }
 
 #[derive(Deserialize, Clone)]
+pub struct OutputConfig {
+    #[serde(default = "default_trade_log_enabled")]
+    pub trade_log_enabled: bool,
+    #[serde(default = "default_trade_log_rotate_bytes")]
+    pub trade_log_rotate_bytes: u64,
+    #[serde(default = "default_trade_log_compress_rotated")]
+    pub trade_log_compress_rotated: bool,
+    #[serde(default = "default_generated_output_max_bytes")]
+    pub generated_output_max_bytes: u64,
+    #[serde(default = "default_summary_log_rotate_bytes")]
+    pub summary_log_rotate_bytes: u64,
+    #[serde(default = "default_summary_log_max_files")]
+    pub summary_log_max_files: usize,
+    #[serde(default = "default_results_max_files")]
+    pub results_max_files: usize,
+    #[serde(default = "default_flush_interval_seconds")]
+    pub flush_interval_seconds: f64,
+}
+
+impl Default for OutputConfig {
+    fn default() -> Self {
+        Self {
+            trade_log_enabled: default_trade_log_enabled(),
+            trade_log_rotate_bytes: default_trade_log_rotate_bytes(),
+            trade_log_compress_rotated: default_trade_log_compress_rotated(),
+            generated_output_max_bytes: default_generated_output_max_bytes(),
+            summary_log_rotate_bytes: default_summary_log_rotate_bytes(),
+            summary_log_max_files: default_summary_log_max_files(),
+            results_max_files: default_results_max_files(),
+            flush_interval_seconds: default_flush_interval_seconds(),
+        }
+    }
+}
+
+#[derive(Deserialize, Clone)]
 pub struct WebsocketConfig {
     #[serde(default = "default_ping_interval")]
     pub ping_interval: u64,
@@ -105,23 +142,81 @@ impl Default for WebsocketConfig {
 }
 
 // Defaults
-fn default_leverage() -> u32 { 1 }
-fn default_levels() -> usize { 2 }
-fn default_window_steps() -> usize { 6000 }
-fn default_step_ns() -> u64 { 100_000_000 }
-fn default_looking_depth() -> f64 { 0.025 }
-fn default_min_warmup() -> u64 { 100 }
-fn default_warmup_seconds() -> f64 { 600.0 }
-fn default_alpha_source() -> String { "binance".to_string() }
-fn default_stale_seconds() -> f64 { 5.0 }
-fn default_alpha_min_samples() -> u64 { 150 }
-fn default_bbo_min_samples() -> u64 { 10 }
-fn default_depth_snapshot_limit() -> usize { 1000 }
-fn default_min_loop_interval() -> f64 { 0.1 }
-fn default_ping_interval() -> u64 { 20 }
-fn default_recv_timeout() -> f64 { 30.0 }
-fn default_reconnect_base() -> u64 { 5 }
-fn default_reconnect_max() -> u64 { 60 }
+fn default_leverage() -> u32 {
+    1
+}
+fn default_levels() -> usize {
+    2
+}
+fn default_window_steps() -> usize {
+    6000
+}
+fn default_step_ns() -> u64 {
+    100_000_000
+}
+fn default_looking_depth() -> f64 {
+    0.025
+}
+fn default_min_warmup() -> u64 {
+    100
+}
+fn default_warmup_seconds() -> f64 {
+    600.0
+}
+fn default_alpha_source() -> String {
+    "binance".to_string()
+}
+fn default_stale_seconds() -> f64 {
+    5.0
+}
+fn default_alpha_min_samples() -> u64 {
+    150
+}
+fn default_bbo_min_samples() -> u64 {
+    10
+}
+fn default_depth_snapshot_limit() -> usize {
+    1000
+}
+fn default_min_loop_interval() -> f64 {
+    0.1
+}
+fn default_ping_interval() -> u64 {
+    20
+}
+fn default_recv_timeout() -> f64 {
+    30.0
+}
+fn default_reconnect_base() -> u64 {
+    5
+}
+fn default_reconnect_max() -> u64 {
+    60
+}
+fn default_trade_log_enabled() -> bool {
+    true
+}
+fn default_trade_log_rotate_bytes() -> u64 {
+    128 * 1024
+}
+fn default_trade_log_compress_rotated() -> bool {
+    true
+}
+fn default_generated_output_max_bytes() -> u64 {
+    500 * 1024 * 1024
+}
+fn default_summary_log_rotate_bytes() -> u64 {
+    10 * 1024 * 1024
+}
+fn default_summary_log_max_files() -> usize {
+    3
+}
+fn default_results_max_files() -> usize {
+    50
+}
+fn default_flush_interval_seconds() -> f64 {
+    60.0
+}
 
 impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
@@ -155,10 +250,18 @@ pub struct GridConfig {
     pub fixed: HashMap<String, serde_json::Value>,
 }
 
-fn default_grid_capital() -> f64 { 1000.0 }
-fn default_summary_interval() -> f64 { 60.0 }
-fn default_sim_latency() -> f64 { 0.050 }
-fn default_maker_fee_rate() -> f64 { 0.000_04 }
+fn default_grid_capital() -> f64 {
+    1000.0
+}
+fn default_summary_interval() -> f64 {
+    60.0
+}
+fn default_sim_latency() -> f64 {
+    0.050
+}
+fn default_maker_fee_rate() -> f64 {
+    0.000_04
+}
 
 impl GridConfig {
     pub fn load(path: &Path) -> anyhow::Result<Self> {

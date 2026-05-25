@@ -86,7 +86,10 @@ async fn main() -> anyhow::Result<()> {
 
     tracing::info!(
         "Market {}: id={}, tick(price)={}, tick(amount)={}",
-        symbol, market_id, market_details.price_tick, market_details.amount_tick,
+        symbol,
+        market_id,
+        market_details.price_tick,
+        market_details.amount_tick,
     );
 
     let market_config = MarketConfig {
@@ -101,8 +104,19 @@ async fn main() -> anyhow::Result<()> {
     if cli.dry_run {
         run_single_dry_run(&cli, &app_config, &market_config, market_id, &symbol).await
     } else {
-        let grid_path = cli.grid.clone().unwrap_or_else(|| PathBuf::from("grid_config.json"));
-        run_grid(&cli, &app_config, &market_config, market_id, &symbol, &grid_path).await
+        let grid_path = cli
+            .grid
+            .clone()
+            .unwrap_or_else(|| PathBuf::from("grid_config.json"));
+        run_grid(
+            &cli,
+            &app_config,
+            &market_config,
+            market_id,
+            &symbol,
+            &grid_path,
+        )
+        .await
     }
 }
 
@@ -115,7 +129,15 @@ async fn run_grid(
     grid_path: &PathBuf,
 ) -> anyhow::Result<()> {
     let grid_config = GridConfig::load(grid_path)?;
-    run_with_grid(cli, app_config, market_config, market_id, symbol, &grid_config).await
+    run_with_grid(
+        cli,
+        app_config,
+        market_config,
+        market_id,
+        symbol,
+        &grid_config,
+    )
+    .await
 }
 
 async fn run_single_dry_run(
@@ -136,23 +158,46 @@ async fn run_single_dry_run(
         maker_fee_rate: 0.000_04,
         parameters: {
             let mut m = std::collections::HashMap::new();
-            m.insert("vol_to_half_spread".to_string(), vec![vol_obi.vol_to_half_spread]);
+            m.insert(
+                "vol_to_half_spread".to_string(),
+                vec![vol_obi.vol_to_half_spread],
+            );
             m
         },
         fixed: {
             let mut m = std::collections::HashMap::new();
-            m.insert("min_half_spread_bps".into(), serde_json::json!(vol_obi.min_half_spread_bps));
+            m.insert(
+                "min_half_spread_bps".into(),
+                serde_json::json!(vol_obi.min_half_spread_bps),
+            );
             m.insert("skew".into(), serde_json::json!(vol_obi.skew));
-            m.insert("spread_factor_level1".into(), serde_json::json!(app_config.trading.spread_factor_level1));
-            m.insert("capital_usage_percent".into(), serde_json::json!(app_config.trading.capital_usage_percent));
-            m.insert("num_levels".into(), serde_json::json!(app_config.trading.levels_per_side));
+            m.insert(
+                "spread_factor_level1".into(),
+                serde_json::json!(app_config.trading.spread_factor_level1),
+            );
+            m.insert(
+                "capital_usage_percent".into(),
+                serde_json::json!(app_config.trading.capital_usage_percent),
+            );
+            m.insert(
+                "num_levels".into(),
+                serde_json::json!(app_config.trading.levels_per_side),
+            );
             m.insert("c1_ticks".into(), serde_json::json!(vol_obi.c1_ticks));
             m
         },
     };
 
     tracing::info!("Single dry-run mode | capital=${:.0}", cli.capital);
-    run_with_grid(cli, app_config, market_config, market_id, symbol, &grid_config).await
+    run_with_grid(
+        cli,
+        app_config,
+        market_config,
+        market_id,
+        symbol,
+        &grid_config,
+    )
+    .await
 }
 
 async fn run_with_grid(
@@ -207,7 +252,11 @@ async fn run_with_grid(
                 ws_binance::run_binance_depth(&sym2, tx2, window, depth, snap).await;
             });
 
-            tracing::info!("Binance feeds: {}@bookTicker + {}@depth@100ms", binance_sym, binance_sym);
+            tracing::info!(
+                "Binance feeds: {}@bookTicker + {}@depth@100ms",
+                binance_sym,
+                binance_sym
+            );
         }
     }
 
@@ -217,12 +266,18 @@ async fn run_with_grid(
     let test_duration = cli.test.map(|s| std::time::Duration::from_secs(s));
     let mut warmup_complete = false;
     let mut last_warmup_log = Instant::now();
+    let mut flush_ticker = tokio::time::interval(runner.flush_interval());
+    flush_ticker.tick().await;
 
     // Handle both SIGINT (Ctrl+C) and SIGTERM (kill, Docker stop)
     let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         .expect("failed to register SIGTERM handler");
 
-    tracing::info!("Entering main loop ({} slots), warmup period started ({}s)...", runner.slot_count(), warmup_seconds);
+    tracing::info!(
+        "Entering main loop ({} slots), warmup period started ({}s)...",
+        runner.slot_count(),
+        warmup_seconds
+    );
 
     loop {
         if let Some(dur) = test_duration {
@@ -324,6 +379,9 @@ async fn run_with_grid(
             _ = sigterm.recv() => {
                 tracing::info!("Received SIGTERM, shutting down gracefully...");
                 break;
+            }
+            _ = flush_ticker.tick() => {
+                runner.flush_all();
             }
         }
     }
