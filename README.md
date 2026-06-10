@@ -74,6 +74,15 @@ Quotes are computed using a volatility + order book imbalance (OBI) model:
 | `spread_factor_level1` | Width multiplier for the second quoting level |
 | `capital_usage_percent` | Fraction of capital used per level |
 
+### Parity with the live trader
+
+The quoting logic mirrors the Python live trader (`lighter_MM/market_maker_v2.py`) formula-for-formula: same volatility/OBI calculator, sizing, max-position and level-placement math, the same 10 bps quote-update threshold (`trading.default_quote_update_threshold_bps`), and the same cancel-everything behavior whenever no usable quote exists (calculator not warmed up, crossed-quote guard, or zero position headroom). Remaining differences are intentional:
+
+- The live trader recomputes order size and max position only on ~$10 mid moves or capital updates (a performance cache); the dry run recomputes every tick with the same formulas.
+- The live trader paces order submission through a rate-limited mailbox and widens its update threshold under exchange quota pressure; the dry run has no quota, so ops apply directly with `sim_latency_s` simulated transit.
+- The live trader re-quotes after 5 s even without a book update; in the dry run, mid, alpha, and position only change on book updates, so that fallback could never produce different quotes.
+- Fills are simulated (POST_ONLY checks plus a new-liquidity delta model) — a real exchange's queue position cannot be replicated.
+
 ## Configuration
 
 ### `grid_config.json` (grid mode)
@@ -101,9 +110,11 @@ Defines the parameter sweep. All combinations in `parameters` are crossed (carte
 }
 ```
 
-### `config.json` (single dry-run mode)
+An optional top-level `maker_fee_rate` (default `0.00004`, i.e. 0.004%) is deducted from PnL on every simulated fill. `sim_latency_s` models exchange round-trip time: orders only become fillable (and POST_ONLY is re-checked) after this delay.
 
-Controls trading strategy, alpha source, WebSocket settings, performance tuning, and output retention. See `src/config.rs` for all fields and defaults.
+### `config.json` (both modes)
+
+Controls trading strategy defaults, vol/OBI windowing, alpha source, WebSocket settings, and output retention. Grid mode reads the `vol_obi` windowing, `alpha`, `min_order_value_usd`, `default_quote_update_threshold_bps`, and `output` settings from here; single dry-run mode additionally uses the `trading` strategy parameters directly. Notable: `trading.default_quote_update_threshold_bps` (default `10.0`) — resting orders are only modified when the new price moves more than this, matching the live trader at full quota. See `src/config.rs` for all fields and defaults.
 
 ## Environment Variables
 

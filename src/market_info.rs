@@ -25,16 +25,6 @@ pub struct MarketDetails {
     pub min_quote_amount: f64,
 }
 
-/// Fallback tick sizes for known symbols.
-fn fallback_tick_size(symbol: &str) -> Option<(f64, f64)> {
-    match symbol.to_uppercase().as_str() {
-        "BTC" => Some((0.1, 0.0001)),
-        "ETH" => Some((0.01, 0.001)),
-        "SOL" => Some((0.001, 0.01)),
-        _ => None,
-    }
-}
-
 /// Fetch market details from Lighter REST API.
 pub async fn get_market_details(symbol: &str) -> anyhow::Result<MarketDetails> {
     let url = format!("{}/api/v1/orderBooks", BASE_URL);
@@ -70,20 +60,7 @@ pub async fn get_market_details(symbol: &str) -> anyhow::Result<MarketDetails> {
         }
     }
 
-    // Fallback
-    if let Some((pt, at)) = fallback_tick_size(symbol) {
-        tracing::warn!(
-            "Market {} not found via API, using fallback ticks: price={}, amount={}",
-            symbol, pt, at
-        );
-        Ok(MarketDetails {
-            market_id: 0,
-            price_tick: pt,
-            amount_tick: at,
-            min_base_amount: 0.0,
-            min_quote_amount: 0.0,
-        })
-    } else {
-        anyhow::bail!("Market {} not found and no fallback available", symbol)
-    }
+    // No silent fallback: the API listing is the only source of market_id,
+    // and guessing one (e.g. 0) would subscribe to a different market.
+    anyhow::bail!("Market {} not found in Lighter API listing", symbol)
 }

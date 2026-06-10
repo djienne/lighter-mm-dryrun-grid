@@ -61,6 +61,27 @@ struct Cli {
     config: PathBuf,
 }
 
+/// Resolves when SIGTERM is received (kill, Docker stop). On platforms
+/// without Unix signals — or if registration fails — never resolves;
+/// Ctrl+C handling covers interactive shutdown there.
+#[cfg(unix)]
+async fn sigterm() {
+    match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+        Ok(mut signal) => {
+            signal.recv().await;
+        }
+        Err(e) => {
+            tracing::warn!("Failed to register SIGTERM handler: {}", e);
+            std::future::pending::<()>().await;
+        }
+    }
+}
+
+#[cfg(not(unix))]
+async fn sigterm() {
+    std::future::pending::<()>().await;
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     // Initialize tracing
@@ -187,6 +208,7 @@ async fn run_single_dry_run(
             m
         },
     };
+    grid_config.validate()?;
 
     tracing::info!("Single dry-run mode | capital=${:.0}", cli.capital);
     run_with_grid(
@@ -270,8 +292,8 @@ async fn run_with_grid(
     flush_ticker.tick().await;
 
     // Handle both SIGINT (Ctrl+C) and SIGTERM (kill, Docker stop)
-    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-        .expect("failed to register SIGTERM handler");
+    let sigterm = sigterm();
+    tokio::pin!(sigterm);
 
     tracing::info!(
         "Entering main loop ({} slots), warmup period started ({}s)...",
@@ -315,13 +337,12 @@ async fn run_with_grid(
                                 runner.check_slot_fills(i, ob_bids, ob_asks, Some(mid), Some(market_id));
                             }
 
-                            // Tick slots if warmup complete
+                            // Tick slots if warmup complete. Un-warmed slots
+                            // (e.g. after a WS reset) still tick so resting
+                            // orders get cancelled, matching the live trader.
                             if warmup_complete {
-                                let any_ready = runner.slots.iter().any(|s| s.calculator.warmed_up());
-                                if any_ready {
-                                    for i in 0..runner.slot_count() {
-                                        runner.tick_slot(i, mid, market_config, ob_bids, ob_asks);
-                                    }
+                                for i in 0..runner.slot_count() {
+                                    runner.tick_slot(i, mid, market_config, ob_bids, ob_asks);
                                 }
                                 if runner.should_log_summary() {
                                     runner.log_summary(mid);
@@ -376,7 +397,7 @@ async fn run_with_grid(
                 tracing::info!("Received SIGINT, shutting down gracefully...");
                 break;
             }
-            _ = sigterm.recv() => {
+            _ = &mut sigterm => {
                 tracing::info!("Received SIGTERM, shutting down gracefully...");
                 break;
             }
@@ -389,7 +410,7 @@ async fn run_with_grid(
     // Shutdown
     tracing::info!("Saving all slot states...");
     runner.flush_all();
-    runner.write_final_results();
+    runner.write_final_results(market_state.mid_price);
     if let Some(mid) = market_state.mid_price {
         runner.log_summary(mid);
     }

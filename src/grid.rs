@@ -92,6 +92,7 @@ pub struct GridRunner {
     sim_latency: f64,
     maker_fee_rate: f64,
     min_order_value_usd: f64,
+    quote_update_threshold_bps: f64,
     // Vol OBI config
     vol_obi_window_steps: usize,
     vol_obi_step_ns: u64,
@@ -199,6 +200,7 @@ impl GridRunner {
             sim_latency: grid_config.sim_latency_s,
             maker_fee_rate: grid_config.maker_fee_rate,
             min_order_value_usd: app_config.trading.min_order_value_usd,
+            quote_update_threshold_bps: app_config.trading.default_quote_update_threshold_bps,
             vol_obi_window_steps: vol_obi.window_steps,
             vol_obi_step_ns: vol_obi.step_ns,
             vol_obi_looking_depth: vol_obi.looking_depth,
@@ -306,23 +308,6 @@ impl GridRunner {
         Ok(())
     }
 
-    /// Feed orderbook update to all slots (calculator + fill check).
-    pub fn on_book_update(
-        &mut self,
-        _mid: f64,
-        alpha_override: Option<f64>,
-        _market_config: &MarketConfig,
-    ) {
-        // We can't iterate mutably over slots while also passing shared book references.
-        // Since each slot has its own calculator and engine, we iterate by index.
-        for i in 0..self.slots.len() {
-            let slot = &mut self.slots[i];
-            slot.calculator.set_alpha_override(alpha_override);
-            // Note: We need the shared orderbook from MarketState, which the caller manages.
-            // The caller should feed the bids/asks directly.
-        }
-    }
-
     /// Feed calculator update for a specific slot.
     pub fn feed_slot_calculator(
         &mut self,
@@ -408,31 +393,28 @@ impl GridRunner {
             self.leverage,
         );
 
-        if !slot.calculator.warmed_up() {
-            return;
-        }
         if max_pos > 0.0 {
             slot.calculator.set_max_position_dollar(max_pos);
         }
 
-        let quote = match slot.calculator.quote(mid, slot.account.position_size) {
-            Some(q) => q,
-            None => return,
-        };
+        // Live-trader parity (market_maker_v2.py calculate_order_prices): when
+        // there is no usable quote — calculator not warmed up, crossed-quote
+        // guard, or max_pos <= 0 — emit all-None levels so any resting orders
+        // are cancelled below instead of left fillable at stale prices.
+        let (mut buy_0, mut sell_0) = (None, None);
+        if slot.calculator.warmed_up() && max_pos > 0.0 {
+            if let Some((bid, ask)) = slot.calculator.quote(mid, slot.account.position_size) {
+                buy_0 = Some(bid);
+                sell_0 = Some(ask);
 
-        let (mut buy_0, mut sell_0) = (Some(quote.0), Some(quote.1));
-
-        // Position limit suppression
-        if max_pos > 0.0 {
-            let pos_val = slot.account.position_size.abs() * mid;
-            if pos_val >= max_pos {
-                if slot.account.position_size > 0.0 {
-                    buy_0 = None;
-                } else if slot.account.position_size < 0.0 {
-                    sell_0 = None;
-                }
-                if buy_0.is_none() && sell_0.is_none() {
-                    return;
+                // Position limit: suppress the side that would increase exposure.
+                let pos_val = slot.account.position_size.abs() * mid;
+                if pos_val >= max_pos {
+                    if slot.account.position_size > 0.0 {
+                        buy_0 = None;
+                    } else if slot.account.position_size < 0.0 {
+                        sell_0 = None;
+                    }
                 }
             }
         }
@@ -467,7 +449,13 @@ impl GridRunner {
         }
 
         // Collect ops
-        let ops = collect_slot_ops(slot, &levels, base_amount, market_config);
+        let ops = collect_slot_ops(
+            slot,
+            &levels,
+            base_amount,
+            market_config,
+            self.quote_update_threshold_bps,
+        );
 
         if !ops.is_empty() {
             let best_bid = bids.keys().next_back().map(|k| k.into_inner());
@@ -609,8 +597,9 @@ impl GridRunner {
         self.enforce_output_cap();
     }
 
-    /// Write final CSV results.
-    pub fn write_final_results(&self) {
+    /// Write final CSV results. `mid` is the last known mid-price, used to
+    /// value open positions; without it unrealized PnL is reported as 0.
+    pub fn write_final_results(&self, mid: Option<f64>) {
         let ts = chrono::Utc::now().format("%Y%m%d_%H%M%S");
         let csv_path = self
             .grid_dir
@@ -646,9 +635,9 @@ impl GridRunner {
         for slot in &self.slots {
             let e = &slot.dry_engine;
             let p = &slot.params;
-            let unrealized = e.compute_unrealized_pnl(None); // mid not available at shutdown
+            let unrealized = e.compute_unrealized_pnl(mid);
             let total = e.realized_pnl + unrealized;
-            let pv = slot.account.portfolio_value.unwrap_or(0.0);
+            let pv = e.initial_portfolio_value + e.realized_pnl + unrealized;
 
             let _ = wtr.write_record(&[
                 &p.label,
@@ -986,9 +975,9 @@ fn collect_slot_ops(
     level_prices: &[(Option<f64>, Option<f64>)],
     base_amount: f64,
     market_config: &MarketConfig,
+    threshold: f64,
 ) -> Vec<BatchOp> {
     let mut ops = Vec::new();
-    let threshold = 10.0; // fixed threshold in dry-run
     let amount_tick = market_config.amount_tick_float;
 
     for (level, &(buy_price, sell_price)) in level_prices.iter().enumerate() {
@@ -1083,4 +1072,149 @@ fn collect_slot_ops(
         }
     }
     ops
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::orderbook::BookSide;
+    use ordered_float::OrderedFloat;
+    use std::sync::Mutex;
+
+    // GridRunner::new reads the LOG_DIR env var; serialize construction so
+    // parallel tests don't race on it.
+    static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    const MID: f64 = 100_000.0;
+
+    fn market_config() -> MarketConfig {
+        MarketConfig {
+            market_id: Some(1),
+            price_tick_float: 0.1,
+            amount_tick_float: 0.00001,
+            min_base_amount: 0.0,
+            min_quote_amount: 0.0,
+        }
+    }
+
+    fn make_book() -> (BookSide, BookSide) {
+        let mut bids = BookSide::new();
+        let mut asks = BookSide::new();
+        for i in 1..=50 {
+            bids.insert(OrderedFloat(MID - 0.1 * i as f64), 1.0);
+            asks.insert(OrderedFloat(MID + 0.1 * i as f64), 1.0);
+        }
+        (bids, asks)
+    }
+
+    fn make_runner(test_name: &str) -> GridRunner {
+        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let dir = std::env::temp_dir().join(format!("grid_test_{}", test_name));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::env::set_var("LOG_DIR", &dir);
+
+        let grid_cfg: GridConfig = serde_json::from_str(
+            r#"{
+                "capital": 1000,
+                "leverage": 1,
+                "warmup_seconds": 0,
+                "summary_interval_seconds": 60,
+                "sim_latency_s": 0.0,
+                "parameters": { "vol_to_half_spread": [10.0] },
+                "fixed": {
+                    "min_half_spread_bps": 4,
+                    "spread_factor_level1": 2.0,
+                    "capital_usage_percent": 0.12,
+                    "num_levels": 2
+                }
+            }"#,
+        )
+        .unwrap();
+        let app_cfg: Config = serde_json::from_str(
+            r#"{
+                "trading": {
+                    "leverage": 1,
+                    "min_order_value_usd": 14.5,
+                    "vol_obi": {}
+                }
+            }"#,
+        )
+        .unwrap();
+
+        let mut runner = GridRunner::new(&grid_cfg, &app_cfg, test_name).unwrap();
+        runner.create_slots(&market_config()).unwrap();
+        runner
+    }
+
+    /// Warm the slot calculator and place orders on both sides.
+    fn warm_and_quote(runner: &mut GridRunner, bids: &BookSide, asks: &BookSide) {
+        let mc = market_config();
+        for i in 0..101 {
+            let mid = MID + (i as f64 * 0.7).sin();
+            runner.feed_slot_calculator(0, mid, bids, asks, None);
+        }
+        assert!(runner.slots[0].calculator.warmed_up());
+        runner.tick_slot(0, MID, &mc, bids, asks);
+        assert!(
+            runner.slots[0].orders.bid_order_ids.iter().any(|o| o.is_some()),
+            "expected resting bids after warm tick"
+        );
+        assert!(
+            runner.slots[0].orders.ask_order_ids.iter().any(|o| o.is_some()),
+            "expected resting asks after warm tick"
+        );
+    }
+
+    #[test]
+    fn tick_cancels_all_orders_when_calculator_resets() {
+        let mut runner = make_runner("cancelreset");
+        let (bids, asks) = make_book();
+        let mc = market_config();
+        warm_and_quote(&mut runner, &bids, &asks);
+
+        // Mid-run WS reset: live trader cancels everything via all-None levels.
+        runner.slots[0].calculator.reset();
+        runner.tick_slot(0, MID, &mc, &bids, &asks);
+        // Cancels apply on the next fill check (zero sim latency here).
+        runner.check_slot_fills(0, &bids, &asks, Some(MID), Some(1));
+
+        let slot = &runner.slots[0];
+        assert!(slot.orders.bid_order_ids.iter().all(|o| o.is_none()));
+        assert!(slot.orders.ask_order_ids.iter().all(|o| o.is_none()));
+    }
+
+    #[test]
+    fn tick_cancels_all_orders_when_max_pos_is_zero() {
+        let mut runner = make_runner("maxposzero");
+        let (bids, asks) = make_book();
+        let mc = market_config();
+        warm_and_quote(&mut runner, &bids, &asks);
+
+        // Capital so low that order-level reservations exceed it: max_pos == 0.
+        // Live trader suppresses ALL quoting and cancels resting orders.
+        runner.slots[0].account.available_capital = Some(20.0);
+        runner.tick_slot(0, MID, &mc, &bids, &asks);
+        runner.check_slot_fills(0, &bids, &asks, Some(MID), Some(1));
+
+        let slot = &runner.slots[0];
+        assert!(slot.orders.bid_order_ids.iter().all(|o| o.is_none()));
+        assert!(slot.orders.ask_order_ids.iter().all(|o| o.is_none()));
+    }
+
+    #[test]
+    fn tick_suppresses_only_adding_side_at_position_limit() {
+        let mut runner = make_runner("poslimit");
+        let (bids, asks) = make_book();
+        let mc = market_config();
+        warm_and_quote(&mut runner, &bids, &asks);
+
+        // Long position worth more than max_pos: buys cancelled, sells kept.
+        runner.slots[0].account.position_size = 0.01; // $1000 at MID >= max_pos
+        runner.tick_slot(0, MID, &mc, &bids, &asks);
+        runner.check_slot_fills(0, &bids, &asks, Some(MID), Some(1));
+
+        let slot = &runner.slots[0];
+        assert!(slot.orders.bid_order_ids.iter().all(|o| o.is_none()));
+        assert!(slot.orders.ask_order_ids.iter().any(|o| o.is_some()));
+    }
 }

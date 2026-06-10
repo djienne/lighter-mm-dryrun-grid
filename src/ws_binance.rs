@@ -240,6 +240,8 @@ pub async fn run_binance_depth(
                 let synced = first_valid || buffer.is_empty();
                 if !synced {
                     tracing::warn!("Binance depth: no valid event in buffer, retrying...");
+                    tokio::time::sleep(tokio::time::Duration::from_secs(backoff)).await;
+                    backoff = (backoff * 2).min(60);
                     continue;
                 }
 
@@ -265,18 +267,37 @@ pub async fn run_binance_depth(
                             }
 
                             // Sequence check
-                            let pu = event.get("pu").and_then(|v| v.as_i64()).unwrap_or(0);
-                            if prev_u != 0 && pu != prev_u {
-                                tracing::warn!(
-                                    "Binance depth sequence gap: pu={} expected={}",
-                                    pu,
-                                    prev_u,
-                                );
-                                break; // reconnect
+                            let u = event.get("u").and_then(|v| v.as_i64()).unwrap_or(0);
+                            if prev_u == 0 {
+                                // Nothing was applied from the drain buffer:
+                                // align the first live event against the REST
+                                // snapshot, same as the buffered path.
+                                if u <= last_update_id {
+                                    continue;
+                                }
+                                let big_u =
+                                    event.get("U").and_then(|v| v.as_i64()).unwrap_or(0);
+                                if big_u > last_update_id + 1 {
+                                    tracing::warn!(
+                                        "Binance depth: first event U={} leaves gap after snapshot lastUpdateId={}",
+                                        big_u,
+                                        last_update_id,
+                                    );
+                                    break; // reconnect
+                                }
+                            } else {
+                                let pu = event.get("pu").and_then(|v| v.as_i64()).unwrap_or(0);
+                                if pu != prev_u {
+                                    tracing::warn!(
+                                        "Binance depth sequence gap: pu={} expected={}",
+                                        pu,
+                                        prev_u,
+                                    );
+                                    break; // reconnect
+                                }
                             }
 
                             apply_binance_diff(&event, &mut bids, &mut asks);
-                            let u = event.get("u").and_then(|v| v.as_i64()).unwrap_or(0);
                             prev_u = u;
 
                             // Compute alpha
@@ -323,6 +344,22 @@ pub async fn run_binance_depth(
     }
 }
 
+/// Parse a `[price, qty]` level. Returns None for malformed entries so they
+/// are skipped instead of landing in the book at price 0.0 (which would
+/// become best ask and corrupt the mid).
+fn parse_level(level: &serde_json::Value) -> Option<(f64, f64)> {
+    let arr = level.as_array()?;
+    if arr.len() < 2 {
+        return None;
+    }
+    let price: f64 = arr[0].as_str()?.parse().ok()?;
+    let qty: f64 = arr[1].as_str()?.parse().ok()?;
+    if !price.is_finite() || price <= 0.0 || !qty.is_finite() || qty < 0.0 {
+        return None;
+    }
+    Some((price, qty))
+}
+
 fn apply_binance_snapshot(
     data: &serde_json::Value,
     bids: &mut BinanceBook,
@@ -333,27 +370,17 @@ fn apply_binance_snapshot(
     asks.clear();
     if let Some(bids_arr) = data.get("bids").and_then(|v| v.as_array()) {
         for level in bids_arr {
-            if let Some(arr) = level.as_array() {
-                if arr.len() >= 2 {
-                    let price: f64 = arr[0].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let qty: f64 = arr[1].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    if qty > 0.0 {
-                        bids.insert(OrderedFloat(price), qty);
-                    }
-                }
+            let Some((price, qty)) = parse_level(level) else { continue };
+            if qty > 0.0 {
+                bids.insert(OrderedFloat(price), qty);
             }
         }
     }
     if let Some(asks_arr) = data.get("asks").and_then(|v| v.as_array()) {
         for level in asks_arr {
-            if let Some(arr) = level.as_array() {
-                if arr.len() >= 2 {
-                    let price: f64 = arr[0].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let qty: f64 = arr[1].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    if qty > 0.0 {
-                        asks.insert(OrderedFloat(price), qty);
-                    }
-                }
+            let Some((price, qty)) = parse_level(level) else { continue };
+            if qty > 0.0 {
+                asks.insert(OrderedFloat(price), qty);
             }
         }
     }
@@ -367,33 +394,23 @@ fn apply_binance_diff(
 ) {
     if let Some(bids_arr) = event.get("b").and_then(|v| v.as_array()) {
         for level in bids_arr {
-            if let Some(arr) = level.as_array() {
-                if arr.len() >= 2 {
-                    let price: f64 = arr[0].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let qty: f64 = arr[1].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let key = OrderedFloat(price);
-                    if qty == 0.0 {
-                        bids.remove(&key);
-                    } else {
-                        bids.insert(key, qty);
-                    }
-                }
+            let Some((price, qty)) = parse_level(level) else { continue };
+            let key = OrderedFloat(price);
+            if qty == 0.0 {
+                bids.remove(&key);
+            } else {
+                bids.insert(key, qty);
             }
         }
     }
     if let Some(asks_arr) = event.get("a").and_then(|v| v.as_array()) {
         for level in asks_arr {
-            if let Some(arr) = level.as_array() {
-                if arr.len() >= 2 {
-                    let price: f64 = arr[0].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let qty: f64 = arr[1].as_str().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-                    let key = OrderedFloat(price);
-                    if qty == 0.0 {
-                        asks.remove(&key);
-                    } else {
-                        asks.insert(key, qty);
-                    }
-                }
+            let Some((price, qty)) = parse_level(level) else { continue };
+            let key = OrderedFloat(price);
+            if qty == 0.0 {
+                asks.remove(&key);
+            } else {
+                asks.insert(key, qty);
             }
         }
     }
@@ -425,4 +442,48 @@ fn compute_imbalance(
     }
 
     sum_bid - sum_ask
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_level_rejects_malformed() {
+        assert_eq!(parse_level(&serde_json::json!(["oops", "1.5"])), None);
+        assert_eq!(parse_level(&serde_json::json!(["0", "1.5"])), None);
+        assert_eq!(parse_level(&serde_json::json!(["-1.0", "1.5"])), None);
+        assert_eq!(parse_level(&serde_json::json!(["100.0", "-2.0"])), None);
+        assert_eq!(parse_level(&serde_json::json!(["100.0"])), None);
+        assert_eq!(parse_level(&serde_json::json!([100.0, 1.5])), None); // numbers, not strings
+    }
+
+    #[test]
+    fn parse_level_accepts_valid() {
+        assert_eq!(
+            parse_level(&serde_json::json!(["100.5", "0.25"])),
+            Some((100.5, 0.25))
+        );
+        // qty 0 is a valid delete marker in diffs
+        assert_eq!(
+            parse_level(&serde_json::json!(["100.5", "0"])),
+            Some((100.5, 0.0))
+        );
+    }
+
+    #[test]
+    fn diff_skips_malformed_levels() {
+        let mut bids = BinanceBook::new();
+        let mut asks = BinanceBook::new();
+        bids.insert(OrderedFloat(100.0), 1.0);
+        let event = serde_json::json!({
+            "b": [["oops", "2.0"], ["101.0", "3.0"]],
+            "a": [["bad", "5.0"]],
+        });
+        apply_binance_diff(&event, &mut bids, &mut asks);
+        assert_eq!(bids.len(), 2);
+        assert_eq!(bids.get(&OrderedFloat(101.0)), Some(&3.0));
+        assert!(!bids.contains_key(&OrderedFloat(0.0)));
+        assert!(asks.is_empty());
+    }
 }

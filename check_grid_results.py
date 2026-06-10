@@ -19,14 +19,14 @@ from datetime import datetime, timezone
 
 
 def parse_param_key(pk: str) -> dict:
-    """Extract parameter values from a param_key like 'v10_m4_s0.1_f2_c0.12_l2_c120'."""
+    """Extract parameter values from a param_key like 'v10_m4_s0.1_f2_c0.12_l2_t120'."""
     params = {}
     tokens = pk.split("_")
     i = 0
     while i < len(tokens):
         t = tokens[i]
         if t.startswith("v") and t[1:].replace(".", "").replace("-", "").isdigit():
-            params["vol_to_half_kind_spread"] = float(t[1:])
+            params["vol_to_half_spread"] = float(t[1:])
         elif t.startswith("m") and t[1:].replace(".", "").replace("-", "").isdigit():
             params["min_half_spread_bps"] = float(t[1:])
         elif t.startswith("s") and t[1:].replace(".", "").replace("-", "").isdigit():
@@ -40,9 +40,6 @@ def parse_param_key(pk: str) -> dict:
         elif t.startswith("l") and t[1:].isdigit():
             params["num_levels"] = int(t[1:])
         i += 1
-    # Fix misnamed key
-    if "vol_to_half_kind_spread" in params:
-        params["vol_to_half_spread"] = params.pop("vol_to_half_kind_spread")
     return params
 
 
@@ -301,10 +298,11 @@ def print_summary(slots: list[dict], trade_counts: dict, top_n: int, sort_key: s
             if v is not None and sk is not None:
                 lookup[(v, sk, c1)] = s["total_pnl"]
 
-        # If c1_ticks is varied, show one heatmap per c1 value
-        c1_groups = c1_vals if len(c1_vals) > 1 else [None]
+        # One heatmap per c1 value; lookup keys always use the slot's actual
+        # c1 (or None when absent), so a single-valued c1 axis still matches.
+        c1_groups = c1_vals if c1_vals else [None]
         for c1 in c1_groups:
-            if c1 is not None:
+            if len(c1_vals) > 1:
                 print(f"PnL HEATMAP (v2hs x skew) @ c1_ticks={c1:.0f}:")
             else:
                 print("PnL HEATMAP (vol_to_half_spread x skew):")

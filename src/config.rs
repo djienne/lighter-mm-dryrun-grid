@@ -23,10 +23,12 @@ pub struct TradingConfig {
     pub leverage: u32,
     #[serde(default = "default_levels")]
     pub levels_per_side: usize,
-    #[serde(default)]
+    #[serde(default = "default_capital_usage")]
     pub capital_usage_percent: f64,
     #[serde(default)]
     pub spread_factor_level1: f64,
+    #[serde(default = "default_quote_update_threshold_bps")]
+    pub default_quote_update_threshold_bps: f64,
     #[serde(default)]
     pub min_order_value_usd: f64,
     #[serde(default)]
@@ -145,6 +147,12 @@ impl Default for WebsocketConfig {
 fn default_leverage() -> u32 {
     1
 }
+fn default_capital_usage() -> f64 {
+    0.12
+}
+fn default_quote_update_threshold_bps() -> f64 {
+    10.0
+}
 fn default_levels() -> usize {
     2
 }
@@ -221,9 +229,38 @@ fn default_flush_interval_seconds() -> f64 {
 impl Config {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let data = std::fs::read_to_string(path)?;
-        // Strip comments (JSON doesn't support them, but config.json has _comment fields)
+        // Unknown JSON fields are silently ignored by serde.
         let config: Config = serde_json::from_str(&data)?;
+        config.validate()?;
         Ok(config)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        let t = &self.trading;
+        if t.leverage < 1 {
+            anyhow::bail!("trading.leverage must be >= 1 (got {})", t.leverage);
+        }
+        if !(t.capital_usage_percent > 0.0 && t.capital_usage_percent <= 1.0) {
+            anyhow::bail!(
+                "trading.capital_usage_percent must be in (0, 1] (got {})",
+                t.capital_usage_percent
+            );
+        }
+        if !t.default_quote_update_threshold_bps.is_finite()
+            || t.default_quote_update_threshold_bps < 0.0
+        {
+            anyhow::bail!(
+                "trading.default_quote_update_threshold_bps must be >= 0 (got {})",
+                t.default_quote_update_threshold_bps
+            );
+        }
+        if !t.vol_obi.warmup_seconds.is_finite() || t.vol_obi.warmup_seconds < 0.0 {
+            anyhow::bail!(
+                "trading.vol_obi.warmup_seconds must be >= 0 (got {})",
+                t.vol_obi.warmup_seconds
+            );
+        }
+        Ok(())
     }
 }
 
@@ -267,6 +304,89 @@ impl GridConfig {
     pub fn load(path: &Path) -> anyhow::Result<Self> {
         let data = std::fs::read_to_string(path)?;
         let config: GridConfig = serde_json::from_str(&data)?;
+        config.validate()?;
         Ok(config)
+    }
+
+    pub fn validate(&self) -> anyhow::Result<()> {
+        if !self.capital.is_finite() || self.capital <= 0.0 {
+            anyhow::bail!("grid capital must be > 0 (got {})", self.capital);
+        }
+        if self.leverage < 1 {
+            anyhow::bail!("grid leverage must be >= 1 (got {})", self.leverage);
+        }
+        if !self.warmup_seconds.is_finite() || self.warmup_seconds < 0.0 {
+            anyhow::bail!("warmup_seconds must be >= 0 (got {})", self.warmup_seconds);
+        }
+        if !self.summary_interval_seconds.is_finite() || self.summary_interval_seconds <= 0.0 {
+            anyhow::bail!(
+                "summary_interval_seconds must be > 0 (got {})",
+                self.summary_interval_seconds
+            );
+        }
+        // A negative value would panic in Duration::from_secs_f64.
+        if !self.sim_latency_s.is_finite() || self.sim_latency_s < 0.0 {
+            anyhow::bail!("sim_latency_s must be >= 0 (got {})", self.sim_latency_s);
+        }
+        if !self.maker_fee_rate.is_finite() || self.maker_fee_rate < 0.0 {
+            anyhow::bail!("maker_fee_rate must be >= 0 (got {})", self.maker_fee_rate);
+        }
+        for (name, values) in &self.parameters {
+            if values.is_empty() {
+                anyhow::bail!("grid parameter axis '{}' must not be empty", name);
+            }
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn base_grid() -> GridConfig {
+        GridConfig {
+            capital: 1000.0,
+            leverage: 1,
+            warmup_seconds: 600.0,
+            summary_interval_seconds: 60.0,
+            sim_latency_s: 0.05,
+            maker_fee_rate: 0.000_04,
+            parameters: HashMap::from([("vol_to_half_spread".to_string(), vec![10.0])]),
+            fixed: HashMap::new(),
+        }
+    }
+
+    #[test]
+    fn valid_grid_config_passes() {
+        assert!(base_grid().validate().is_ok());
+    }
+
+    #[test]
+    fn rejects_negative_sim_latency() {
+        let mut cfg = base_grid();
+        cfg.sim_latency_s = -0.1;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_zero_leverage() {
+        let mut cfg = base_grid();
+        cfg.leverage = 0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_nonpositive_capital() {
+        let mut cfg = base_grid();
+        cfg.capital = 0.0;
+        assert!(cfg.validate().is_err());
+    }
+
+    #[test]
+    fn rejects_empty_parameter_axis() {
+        let mut cfg = base_grid();
+        cfg.parameters.insert("skew".to_string(), vec![]);
+        assert!(cfg.validate().is_err());
     }
 }

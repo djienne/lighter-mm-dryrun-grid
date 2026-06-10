@@ -414,10 +414,8 @@ impl DryRunEngine {
             }
             Side::Sell => {
                 // For sell orders, snapshot bids at or above our price
-                for (&bid_price, &bid_size) in bids.iter() {
-                    if bid_price.into_inner() >= price {
-                        snap.insert(bid_price, bid_size);
-                    }
+                for (&bid_price, &bid_size) in bids.range(OrderedFloat(price)..) {
+                    snap.insert(bid_price, bid_size);
                 }
             }
         }
@@ -685,10 +683,8 @@ impl DryRunEngine {
         }
 
         let mut current: HashMap<OrderedFloat<f64>, f64> = HashMap::new();
-        for (&bid_price, &bid_size) in bids.iter() {
-            if bid_price.into_inner() >= sim.price {
-                current.insert(bid_price, bid_size);
-            }
+        for (&bid_price, &bid_size) in bids.range(OrderedFloat(sim.price)..) {
+            current.insert(bid_price, bid_size);
         }
 
         let prev = &sim.prev_by_price;
@@ -873,5 +869,24 @@ impl DryRunEngine {
 
     pub fn live_order_count(&self) -> usize {
         self.live_orders.len()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn unrealized_pnl_uses_mid_price() {
+        let mut e = DryRunEngine::new(1, 0.0, 0.0, None);
+        e.position = 2.0;
+        e.entry_vwap = 100.0;
+        // Without a mid price, open positions cannot be valued.
+        assert_eq!(e.compute_unrealized_pnl(None), 0.0);
+        // Long 2 @ 100, mid 105 → +10
+        assert!((e.compute_unrealized_pnl(Some(105.0)) - 10.0).abs() < 1e-9);
+        // Short 2 @ 100, mid 95 → +10
+        e.position = -2.0;
+        assert!((e.compute_unrealized_pnl(Some(95.0)) - 10.0).abs() < 1e-9);
     }
 }

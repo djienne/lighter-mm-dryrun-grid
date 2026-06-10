@@ -1,8 +1,6 @@
-use std::collections::VecDeque;
 use std::time::Instant;
 
 use crate::orderbook::Orderbook;
-use crate::vol_obi::VolObiCalculator;
 
 // ---------------------------------------------------------------------------
 // Market state (shared across grid slots)
@@ -53,7 +51,6 @@ pub struct AccountState {
     pub available_capital: Option<f64>,
     pub portfolio_value: Option<f64>,
     pub position_size: f64,
-    pub recent_trades: VecDeque<TradeRecord>,
 }
 
 impl AccountState {
@@ -62,19 +59,8 @@ impl AccountState {
             available_capital: Some(capital),
             portfolio_value: Some(capital),
             position_size: 0.0,
-            recent_trades: VecDeque::with_capacity(20),
         }
     }
-}
-
-#[derive(Clone)]
-pub struct TradeRecord {
-    pub market_id: Option<i64>,
-    pub price: f64,
-    pub size: f64,
-    pub side: String,
-    pub timestamp: i64,
-    pub simulated: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -192,12 +178,4 @@ impl SharedAlpha {
         self.sample_count = 0;
         self.warmed_up = false;
     }
-}
-
-// ---------------------------------------------------------------------------
-// VolObiState wrapper (per-slot)
-// ---------------------------------------------------------------------------
-
-pub struct VolObiState {
-    pub calculator: Option<VolObiCalculator>,
 }
