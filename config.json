@@ -1,6 +1,6 @@
 {
     "trading": {
-        "leverage": 1,
+        "leverage": 2,
         "levels_per_side": 2,
         "capital_usage_percent": 0.12,
         "spread_factor_level1": 2.0,

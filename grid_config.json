@@ -1,6 +1,6 @@
 {
   "capital": 1000,
-  "leverage": 1,
+  "leverage": 2,
   "warmup_seconds": 600,
   "summary_interval_seconds": 60,
   "sim_latency_s": 0.050,
