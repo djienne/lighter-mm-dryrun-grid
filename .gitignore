@@ -1,2 +1,9 @@
 /target
 /logs
+
+# Secrets — the real .env must never be committed.
+.env
+.env.*
+
+# ...but the placeholder template must stay tracked.
+!.env.example
