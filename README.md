@@ -2,8 +2,6 @@
 
 A Rust market-making dry-run engine that runs hundreds of parameter combinations simultaneously against live Lighter DEX and Binance order book feeds, simulating fills in real time without placing real orders — to find optimal spread, skew, and alpha-sensitivity settings under actual market conditions.
 
-⚡ Support this project — Trade on Lighter spot and perpetual markets through https://app.lighter.xyz/?referral=FREQTRADE (100% kickback with this link). Lighter Standard Accounts currently have 0 maker / 0 taker trading fees; Premium Accounts have separate fee tiers.
-
 ## Quick Start
 
 ```bash
@@ -92,7 +90,7 @@ Defines the parameter sweep. All combinations in `parameters` are crossed (carte
 ```json
 {
   "capital": 1000,
-  "leverage": 1,
+  "leverage": 2,
   "warmup_seconds": 600,
   "summary_interval_seconds": 60,
   "sim_latency_s": 0.050,
