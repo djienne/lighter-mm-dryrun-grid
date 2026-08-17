@@ -1,5 +1,9 @@
 services:
   lighter-mm-dryrun:
+    deploy:
+      resources:
+        limits:
+          cpus: '0.1'
     build: .
     image: lighter-mm-dryrun:local
     container_name: lighter-mm-dryrun
